@@ -4,12 +4,22 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
+import fs from "fs";
 
 dotenv.config();
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const sopTemplate = fs.readFileSync(
+  path.join(__dirname, "public" ,"templates", "sop-template.docx"),
+  "utf8"
+);
+
+const sampleSop = fs.readFileSync(
+  path.join(__dirname, "public" ,"templates", "sample-sop.docx"),
+  "utf8"
+);
 
 app.use(cors());
 
@@ -132,6 +142,77 @@ User Query:
     return res.status(500).json({
       success: false,
       message: error.message,
+    });
+  }
+});
+
+// SIMPLIFIED WORKING VERSION
+app.post("/generate-sop", async (req, res) => {
+  try {
+    const { studentData } = req.body;
+
+    // Build a simple, clean prompt
+    const prompt = `Write a Statement of Purpose for a student.
+
+Student: ${studentData.name || 'Student'}
+Country to study: ${studentData.country}
+University: ${studentData.university}
+Course: ${studentData.course}
+Campus: ${studentData.campus}
+
+Write with these headings (use markdown # and ##):
+# Statement of Purpose
+## Introduction
+## Why Study in ${studentData.country}
+## Why Not Home Country
+## Why ${studentData.university}
+## Why ${studentData.course}
+## Why ${studentData.campus}
+## Future Plans
+## Conclusion
+
+Write 1200-1800 words. Use paragraphs. No bullet points.`;
+
+    const response = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 4000,
+    });
+
+    const sop = response.choices[0].message.content;
+
+    res.json({ success: true, sop });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Add this test endpoint temporarily
+app.get("/test-groq", async (req, res) => {
+  try {
+    const testResponse = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        {
+          role: "user",
+          content: "Say 'Hello, Groq API is working!'"
+        }
+      ],
+      max_tokens: 50,
+    });
+    
+    res.json({
+      success: true,
+      response: testResponse.choices[0].message.content
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data || error
     });
   }
 });

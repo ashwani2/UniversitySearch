@@ -44,7 +44,7 @@ app.get("/", (req, res) => {
  */
 app.post("/search", async (req, res) => {
   try {
-    const { query } = req.body;
+    const { query, country, city } = req.body;
 
     if (!query) {
       return res.status(400).json({
@@ -53,21 +53,28 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Location is optional so older clients still work, but when present it
+    // scopes the results to the country/city the student chose.
+    const locationLine = [city, country].filter(Boolean).join(", ");
+    const locationClause = locationLine
+      ? `The student wants to study in ${locationLine}. Only return universities located there (in ${city || "that city"}${country ? `, ${country}` : ""}).`
+      : `Infer the country from the query; if none is given, use the United Kingdom.`;
+
     const prompt = `
 You are an AI university and course finder.
 
-Based on the user query, return universities and matching courses.
+Based on the user query, return universities and matching courses for the requested course and location.
+
+${locationClause}
 
 IMPORTANT RULES:
-1. Return ONLY valid JSON.
-2. Do NOT add markdown.
-3. Do NOT add explanation text.
-4. Return minimum 5 universities in UK.
-5. If user searches courses, include universities.
-6. If user searches universities, include related courses.
-7. Price should be realistic tuition estimate.
-8. Keep same response format exactly.
-9. Price should be in GBP.
+1. Return ONLY valid JSON — a single array. No markdown, no code fences, no explanation.
+2. Return AS MANY relevant universities as you can — at least 20 (include well-known and lesser-known institutions in the location). Never return fewer than 20 unless the location genuinely has fewer.
+3. Every university MUST actually be located in the requested city/country.
+4. For each university include 1-3 courses that match the query.
+5. "price" is a realistic ANNUAL international tuition fee as a ready-to-display string that INCLUDES the local currency symbol, e.g. "£34,000" or a range "£34,000–£38,000" for the UK, "$40,000" for the USA, "CA$38,000" for Canada, "A$45,000" for Australia, "€18,000" for the EU. Use the currency of the university's country.
+6. "location" is the university's city and country.
+7. Keep the response format EXACTLY as shown below.
 
 Response format:
 
@@ -84,8 +91,7 @@ Response format:
   }
 ]
 
-User Query:
-"${query}"
+User Query (course): "${query}"${locationLine ? `\nLocation: ${locationLine}` : ""}
 `;
 
     const response =
@@ -104,7 +110,10 @@ User Query:
           },
         ],
 
-        temperature: 0.5,
+        temperature: 0.3,
+        // Room for 20+ universities of JSON so the array isn't truncated
+        // mid-object (which would make it fail to parse).
+        max_tokens: 6000,
       });
 
     let content =
@@ -112,11 +121,19 @@ User Query:
 
     /**
      * CLEAN RESPONSE
+     * Strip code fences, then slice to the outermost [ ... ] so any stray
+     * prose before/after the array doesn't break JSON.parse.
      */
     content = content
       .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
+
+    const start = content.indexOf("[");
+    const end = content.lastIndexOf("]");
+    if (start !== -1 && end !== -1 && end > start) {
+      content = content.slice(start, end + 1);
+    }
 
     let parsed;
 

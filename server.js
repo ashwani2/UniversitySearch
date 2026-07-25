@@ -74,7 +74,9 @@ IMPORTANT RULES:
 4. For each university include 1-3 courses that match the query.
 5. "price" is a realistic ANNUAL international tuition fee as a ready-to-display string that INCLUDES the local currency symbol, e.g. "£34,000" or a range "£34,000–£38,000" for the UK, "$40,000" for the USA, "CA$38,000" for Canada, "A$45,000" for Australia, "€18,000" for the EU. Use the currency of the university's country.
 6. "location" is the university's city and country.
-7. Keep the response format EXACTLY as shown below.
+7. "websiteName" is the university's official website domain ONLY — e.g. "hull.ac.uk" or "ox.ac.uk". No "https://", no path, no full URL.
+8. "knownFor" is ONE short, factual sentence (max ~120 characters) describing what the university is best known for — its strongest fields, research, or reputation.
+9. Keep the response format EXACTLY as shown below.
 
 Response format:
 
@@ -82,6 +84,8 @@ Response format:
   {
     "universityName": "",
     "location": "",
+    "websiteName": "",
+    "knownFor": "",
     "courses": [
       {
         "courseName": "",
@@ -111,9 +115,9 @@ User Query (course): "${query}"${locationLine ? `\nLocation: ${locationLine}` : 
         ],
 
         temperature: 0.3,
-        // Room for 20+ universities of JSON so the array isn't truncated
-        // mid-object (which would make it fail to parse).
-        max_tokens: 6000,
+        // Room for 20+ universities of JSON (now incl. websiteName + knownFor)
+        // so the array isn't truncated mid-object (which would fail to parse).
+        max_tokens: 7000,
       });
 
     let content =
@@ -168,10 +172,18 @@ app.post("/generate-sop", async (req, res) => {
   try {
     const { studentData } = req.body;
 
-    // Build a simple, clean prompt
-    const prompt = `Write a Statement of Purpose for a student.
+    // The frontend sends the applicant's name as `fullName`; keep `name` as a
+    // fallback for older callers. Without this the name resolves to the literal
+    // "Student" and gets repeated throughout the introduction.
+    const studentName =
+      (studentData.fullName || studentData.name || "").trim() || "the applicant";
 
-Student: ${studentData.name || 'Student'}
+    // Build a simple, clean prompt
+    const prompt = `Write a Statement of Purpose for a student named ${studentName}.
+
+Refer to the applicant by their name, ${studentName}, in the introduction. Write in the first person as ${studentName}. Do NOT use the placeholder word "Student" as their name.
+
+Student: ${studentName}
 Country to study: ${studentData.country}
 University: ${studentData.university}
 Course: ${studentData.course}

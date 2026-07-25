@@ -75,8 +75,9 @@ IMPORTANT RULES:
 5. "price" is a realistic ANNUAL international tuition fee as a ready-to-display string that INCLUDES the local currency symbol, e.g. "£34,000" or a range "£34,000–£38,000" for the UK, "$40,000" for the USA, "CA$38,000" for Canada, "A$45,000" for Australia, "€18,000" for the EU. Use the currency of the university's country.
 6. "location" is the university's city and country.
 7. "websiteName" is the university's official website domain ONLY — e.g. "hull.ac.uk" or "ox.ac.uk". No "https://", no path, no full URL.
-8. "knownFor" is ONE short, factual sentence (max ~120 characters) describing what the university is best known for — its strongest fields, research, or reputation.
-9. Keep the response format EXACTLY as shown below.
+8. "imageUrl" is a direct https URL to the university's official logo or a campus photo ONLY IF you are certain it is a real, working image URL; if unsure, use "" (empty string). NEVER invent or guess image URLs.
+9. "knownFor" is ONE short, factual sentence (max ~120 characters) describing what the university is best known for — its strongest fields, research, or reputation.
+10. Keep the response format EXACTLY as shown below.
 
 Response format:
 
@@ -85,6 +86,7 @@ Response format:
     "universityName": "",
     "location": "",
     "websiteName": "",
+    "imageUrl": "",
     "knownFor": "",
     "courses": [
       {

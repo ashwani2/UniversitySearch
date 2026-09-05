@@ -1,0 +1,33 @@
+# Install:
+#   sudo cp deploy/fly-together-search.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fly-together-search
+# Logs:
+#   journalctl -u fly-together-search -f
+
+[Unit]
+Description=Fly Together SOP generator service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flyapp
+Group=flyapp
+WorkingDirectory=/srv/fly-together-search
+EnvironmentFile=/srv/fly-together-search/.env.production
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fly-together-search
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/fly-together-search
+
+[Install]
+WantedBy=multi-user.target

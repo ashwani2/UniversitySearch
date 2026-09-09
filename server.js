@@ -48,6 +48,98 @@ const groq = new OpenAI({
  */
 const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
+/**
+ * THROUGHPUT BUDGET — read this before raising any limit here.
+ *
+ * The Groq key is capped at 8000 tokens/minute (and 1000 requests/day), shared
+ * by every user of the site. That per-minute ceiling, not the model's 65536
+ * output limit, is what decides how many people can search at once.
+ *
+ * Measured before tuning: one search cost 6681 tokens (563 prompt + 6118
+ * completion, of which 4065 were REASONING). That is 83% of the minute budget
+ * for a single query — roughly one search per minute for the whole site.
+ *
+ * gpt-oss is a reasoning model and spends completion tokens thinking before it
+ * emits anything; the llama-3.3-70b it replaced did not, which is why the old
+ * 7000 budget used to be enough.
+ *
+ * Three levers, in order of effect:
+ *  1. reasoning_effort "low" — this is structured extraction, not a task where
+ *     deliberation improves the answer. Removes the single largest cost.
+ *  2. fewer universities per response — output scales linearly with the count,
+ *     and a UI list of 10 is as useful as 20.
+ *  3. the cache below — a repeated query costs zero tokens, which matters most
+ *     because popular searches repeat constantly.
+ *
+ * Raising SEARCH_MAX_TOKENS above ~7000 is self-defeating: a single request that
+ * large cannot fit inside the 8000/min bucket and will 429.
+ */
+const REASONING_EFFORT = process.env.GROQ_REASONING_EFFORT || "low";
+const SEARCH_MAX_TOKENS = Number(process.env.SEARCH_MAX_TOKENS || 6000);
+const SOP_MAX_TOKENS = Number(process.env.SOP_MAX_TOKENS || 6000);
+const SEARCH_RESULT_COUNT = Number(process.env.SEARCH_RESULT_COUNT || 10);
+
+/**
+ * Result cache. Searches cluster hard on a few course/city combinations, so the
+ * hit rate is high and every hit is a request that costs no tokens and returns
+ * instantly. Keyed on the normalised query so "Data Science" and "data  science"
+ * share an entry.
+ *
+ * Deliberately in-process: one small instance, one service, and a cold cache
+ * after a deploy is harmless. Redis would be more machinery than this earns.
+ */
+const CACHE_TTL_MS = Number(process.env.SEARCH_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
+const CACHE_MAX_ENTRIES = Number(process.env.SEARCH_CACHE_MAX || 500);
+const searchCache = new Map();
+
+function cacheKey(query, country, city) {
+  return [query, country, city]
+    .map((s) => (s || "").toLowerCase().trim().replace(/\s+/g, " "))
+    .join("|");
+}
+
+function cacheGet(key) {
+  const hit = searchCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expires) {
+    searchCache.delete(key);
+    return null;
+  }
+  // Refresh insertion order so the LRU eviction below keeps hot entries.
+  searchCache.delete(key);
+  searchCache.set(key, hit);
+  return hit.payload;
+}
+
+function cacheSet(key, payload) {
+  if (searchCache.size >= CACHE_MAX_ENTRIES) {
+    // Map preserves insertion order, so the first key is the least recently used.
+    searchCache.delete(searchCache.keys().next().value);
+  }
+  searchCache.set(key, { payload, expires: Date.now() + CACHE_TTL_MS });
+}
+
+/** Groq rejects reasoning_effort on models that don't reason; "" opts out. */
+const reasoningParams = REASONING_EFFORT
+  ? { reasoning_effort: REASONING_EFFORT }
+  : {};
+
+/**
+ * finish_reason "length" means the budget ran out mid-answer. Worth logging
+ * loudly: the JSON slice below can still yield parseable output from a truncated
+ * response, so this otherwise fails silently as "fewer results than asked for".
+ */
+function warnIfTruncated(response, label) {
+  const reason = response?.choices?.[0]?.finish_reason;
+  if (reason === "length") {
+    console.warn(
+      `[${label}] TRUNCATED: hit the token limit. reasoning=${response?.usage?.completion_tokens_details?.reasoning_tokens ?? "?"} ` +
+        `completion=${response?.usage?.completion_tokens ?? "?"}. Raise SEARCH_MAX_TOKENS/SOP_MAX_TOKENS.`,
+    );
+  }
+  return reason;
+}
+
 app.get("/", (req, res) => {
   res.send("Groq AI University Search API Running");
 });
@@ -66,6 +158,14 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Serve repeats for free. This is the main reason more than one person a
+    // minute can use the search at all.
+    const key = cacheKey(query, country, city);
+    const cached = cacheGet(key);
+    if (cached) {
+      return res.json({ ...cached, cached: true });
+    }
+
     // Location is optional so older clients still work, but when present it
     // scopes the results to the country/city the student chose.
     const locationLine = [city, country].filter(Boolean).join(", ");
@@ -82,7 +182,7 @@ ${locationClause}
 
 IMPORTANT RULES:
 1. Return ONLY valid JSON — a single array. No markdown, no code fences, no explanation.
-2. Return AS MANY relevant universities as you can — at least 20 (include well-known and lesser-known institutions in the location). Never return fewer than 20 unless the location genuinely has fewer.
+2. Return exactly ${SEARCH_RESULT_COUNT} universities (fewer only if the location genuinely has fewer). Include well-known and lesser-known institutions.
 3. Every university MUST actually be located in the requested city/country.
 4. For each university include 1-3 courses that match the query.
 5. "price" is a realistic ANNUAL international tuition fee as a ready-to-display string that INCLUDES the local currency symbol, e.g. "£34,000" or a range "£34,000–£38,000" for the UK, "$40,000" for the USA, "CA$38,000" for Canada, "A$45,000" for Australia, "€18,000" for the EU. Use the currency of the university's country.
@@ -130,11 +230,13 @@ User Query (course): "${query}"${locationLine ? `\nLocation: ${locationLine}` : 
         ],
 
         temperature: 0.3,
+        ...reasoningParams,
         // Room for 20+ universities of JSON (now incl. websiteName + knownFor)
         // so the array isn't truncated mid-object (which would fail to parse).
-        max_tokens: 7000,
+        max_tokens: SEARCH_MAX_TOKENS,
       });
 
+    warnIfTruncated(response, "search");
     let content =
       response.choices[0].message.content;
 
@@ -166,12 +268,15 @@ User Query (course): "${query}"${locationLine ? `\nLocation: ${locationLine}` : 
       });
     }
 
-    return res.json({
+    const payload = {
       success: true,
       total: parsed.length,
       results: parsed,
       usage: response.usage,
-    });
+    };
+    // Only successful, parsed results are cached — never an error or a partial.
+    cacheSet(key, payload);
+    return res.json(payload);
   } catch (error) {
     console.log(error);
 
@@ -221,9 +326,11 @@ Write 1200-1800 words. Use paragraphs. No bullet points.`;
       model: GROQ_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
-      max_tokens: 4000,
+      max_tokens: SOP_MAX_TOKENS,
+      ...reasoningParams,
     });
 
+    warnIfTruncated(response, "generate-sop");
     const sop = response.choices[0].message.content;
 
     res.json({ success: true, sop });

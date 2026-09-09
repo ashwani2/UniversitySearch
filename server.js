@@ -90,6 +90,8 @@ const SEARCH_RESULT_COUNT = Number(process.env.SEARCH_RESULT_COUNT || 10);
  */
 const CACHE_TTL_MS = Number(process.env.SEARCH_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
 const CACHE_MAX_ENTRIES = Number(process.env.SEARCH_CACHE_MAX || 500);
+// Under-length answers are retried sooner rather than pinned for a full day.
+const SHORT_CACHE_TTL_MS = Number(process.env.SEARCH_SHORT_CACHE_TTL_MS || 10 * 60 * 1000);
 const searchCache = new Map();
 
 function cacheKey(query, country, city) {
@@ -111,12 +113,18 @@ function cacheGet(key) {
   return hit.payload;
 }
 
-function cacheSet(key, payload) {
+/**
+ * Short results get a much shorter TTL. A full result is worth pinning for a
+ * day, but caching an under-length one for 24h freezes a bad answer that a
+ * retry would probably improve — the model is non-deterministic, so the next
+ * attempt is a genuinely different roll.
+ */
+function cacheSet(key, payload, ttlMs = CACHE_TTL_MS) {
   if (searchCache.size >= CACHE_MAX_ENTRIES) {
     // Map preserves insertion order, so the first key is the least recently used.
     searchCache.delete(searchCache.keys().next().value);
   }
-  searchCache.set(key, { payload, expires: Date.now() + CACHE_TTL_MS });
+  searchCache.set(key, { payload, expires: Date.now() + ttlMs });
 }
 
 /** Groq rejects reasoning_effort on models that don't reason; "" opts out. */
@@ -170,7 +178,7 @@ app.post("/search", async (req, res) => {
     // scopes the results to the country/city the student chose.
     const locationLine = [city, country].filter(Boolean).join(", ");
     const locationClause = locationLine
-      ? `The student wants to study in ${locationLine}. Only return universities located there (in ${city || "that city"}${country ? `, ${country}` : ""}).`
+      ? `The student wants to study in ${locationLine}. Start with universities in ${city || "that city"}, then widen to the rest of ${country || "that country"} — nearest first — until you have ${SEARCH_RESULT_COUNT}.`
       : `Infer the country from the query; if none is given, use the United Kingdom.`;
 
     const prompt = `
@@ -182,15 +190,16 @@ ${locationClause}
 
 IMPORTANT RULES:
 1. Return ONLY valid JSON — a single array. No markdown, no code fences, no explanation.
-2. Return exactly ${SEARCH_RESULT_COUNT} universities (fewer only if the location genuinely has fewer). Include well-known and lesser-known institutions.
-3. Every university MUST actually be located in the requested city/country.
-4. For each university include 1-3 courses that match the query.
-5. "price" is a realistic ANNUAL international tuition fee as a ready-to-display string that INCLUDES the local currency symbol, e.g. "£34,000" or a range "£34,000–£38,000" for the UK, "$40,000" for the USA, "CA$38,000" for Canada, "A$45,000" for Australia, "€18,000" for the EU. Use the currency of the university's country.
-6. "location" is the university's city and country.
-7. "websiteName" is the university's official website domain ONLY — e.g. "hull.ac.uk" or "ox.ac.uk". No "https://", no path, no full URL.
-8. "imageUrl" is a direct https URL to the university's official logo or a campus photo ONLY IF you are certain it is a real, working image URL; if unsure, use "" (empty string). NEVER invent or guess image URLs.
-9. "knownFor" is ONE short, factual sentence (max ~120 characters) describing what the university is best known for — its strongest fields, research, or reputation.
-10. Keep the response format EXACTLY as shown below.
+2. Return exactly ${SEARCH_RESULT_COUNT} universities. This is a hard requirement, not a target. Include well-known and lesser-known institutions.
+3. Prefer universities in the requested city. Most cities do not have ${SEARCH_RESULT_COUNT} universities, so when the city has fewer, FILL THE REMAINDER with the nearest universities elsewhere in the requested country, ordered by distance from that city. Only return fewer than ${SEARCH_RESULT_COUNT} if the entire country has fewer.
+4. "location" must state each university's real city and country — never claim a university is in the requested city when it is not.
+5. For each university include 1-3 courses that match the query.
+6. "price" is a realistic ANNUAL international tuition fee as a ready-to-display string that INCLUDES the local currency symbol, e.g. "£34,000" or a range "£34,000–£38,000" for the UK, "$40,000" for the USA, "CA$38,000" for Canada, "A$45,000" for Australia, "€18,000" for the EU. Use the currency of the university's country.
+7. "location" is the university's city and country.
+8. "websiteName" is the university's official website domain ONLY — e.g. "hull.ac.uk" or "ox.ac.uk". No "https://", no path, no full URL.
+9. "imageUrl" is a direct https URL to the university's official logo or a campus photo ONLY IF you are certain it is a real, working image URL; if unsure, use "" (empty string). NEVER invent or guess image URLs.
+10. "knownFor" is ONE short, factual sentence (max ~120 characters) describing what the university is best known for — its strongest fields, research, or reputation.
+11. Keep the response format EXACTLY as shown below.
 
 Response format:
 
@@ -275,7 +284,15 @@ User Query (course): "${query}"${locationLine ? `\nLocation: ${locationLine}` : 
       usage: response.usage,
     };
     // Only successful, parsed results are cached — never an error or a partial.
-    cacheSet(key, payload);
+    // An under-length answer is cached briefly rather than for a day, so the
+    // next request gets another attempt instead of being stuck with it.
+    const full = parsed.length >= SEARCH_RESULT_COUNT;
+    if (!full) {
+      console.warn(
+        `[search] under-length: ${parsed.length}/${SEARCH_RESULT_COUNT} for "${key}" — caching for ${SHORT_CACHE_TTL_MS / 60000}m only`,
+      );
+    }
+    cacheSet(key, payload, full ? CACHE_TTL_MS : SHORT_CACHE_TTL_MS);
     return res.json(payload);
   } catch (error) {
     console.log(error);

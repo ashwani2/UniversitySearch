@@ -35,6 +35,19 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
+/**
+ * Groq retires models on its own schedule, and a retired id fails at request
+ * time with a 404 ("the model does not exist"), not at startup — so the service
+ * looks healthy while every search fails. Keeping it in env means the fix is a
+ * config change and a restart.
+ *
+ * Check what the key can actually reach with:
+ *   curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY"
+ *
+ * The llama-3.x and gemma2 ids this used to hardcode were all decommissioned.
+ */
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
 app.get("/", (req, res) => {
   res.send("Groq AI University Search API Running");
 });
@@ -102,7 +115,7 @@ User Query (course): "${query}"${locationLine ? `\nLocation: ${locationLine}` : 
 
     const response =
       await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
 
         messages: [
           {
@@ -205,7 +218,7 @@ Write with these headings (use markdown # and ##):
 Write 1200-1800 words. Use paragraphs. No bullet points.`;
 
     const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
       max_tokens: 4000,
@@ -225,7 +238,7 @@ Write 1200-1800 words. Use paragraphs. No bullet points.`;
 app.get("/test-groq", async (req, res) => {
   try {
     const testResponse = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_MODEL,
       messages: [
         {
           role: "user",
